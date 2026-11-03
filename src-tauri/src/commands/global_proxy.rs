@@ -69,6 +69,32 @@ pub fn set_global_proxy_url(state: tauri::State<'_, AppState>, url: String) -> R
     Ok(())
 }
 
+/// 获取路由请求的出站代理范围
+///
+/// `mode = "all"`：路由到的所有供应商都走全局代理；
+/// `mode = "selected"`：只有 `providers`（应用 id → 供应商 id 列表）里的供应商走代理，其余直连。
+#[tauri::command]
+pub fn get_global_proxy_scope(
+    state: tauri::State<'_, AppState>,
+) -> Result<http_client::ProxyScope, String> {
+    state.db.get_global_proxy_scope().map_err(|e| e.to_string())
+}
+
+/// 设置路由请求的出站代理范围：先写 DB，再热更新到运行态（下一个路由请求即生效）
+#[tauri::command]
+pub fn set_global_proxy_scope(
+    state: tauri::State<'_, AppState>,
+    scope: http_client::ProxyScope,
+) -> Result<(), String> {
+    let scope = scope.normalized();
+    state
+        .db
+        .set_global_proxy_scope(&scope)
+        .map_err(|e| e.to_string())?;
+    http_client::set_proxy_scope(scope);
+    Ok(())
+}
+
 /// 代理测试结果
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

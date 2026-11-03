@@ -10,9 +10,12 @@ import { useTranslation } from "react-i18next";
 import {
   getGlobalProxyUrl,
   setGlobalProxyUrl,
+  getGlobalProxyScope,
+  setGlobalProxyScope,
   testProxyUrl,
   getUpstreamProxyStatus,
   scanLocalProxies,
+  type ProxyScope,
   type ProxyTestResult,
   type UpstreamProxyStatus,
   type DetectedProxy,
@@ -42,6 +45,42 @@ export function useSetGlobalProxyUrl() {
       toast.success(t("settings.globalProxy.saved"));
       queryClient.invalidateQueries({ queryKey: ["globalProxyUrl"] });
       queryClient.invalidateQueries({ queryKey: ["upstreamProxyStatus"] });
+    },
+    onError: (error: unknown) => {
+      const message =
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "Unknown error";
+      toast.error(t("settings.globalProxy.saveFailed", { error: message }));
+    },
+  });
+}
+
+/**
+ * 获取路由请求的出站代理范围
+ */
+export function useGlobalProxyScope() {
+  return useQuery<ProxyScope>({
+    queryKey: ["globalProxyScope"],
+    queryFn: getGlobalProxyScope,
+    staleTime: 30 * 1000,
+  });
+}
+
+/**
+ * 设置路由请求的出站代理范围
+ */
+export function useSetGlobalProxyScope() {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  return useMutation({
+    mutationFn: setGlobalProxyScope,
+    onSuccess: () => {
+      toast.success(t("settings.globalProxy.scopeSaved"));
+      queryClient.invalidateQueries({ queryKey: ["globalProxyScope"] });
     },
     onError: (error: unknown) => {
       const message =
@@ -106,4 +145,4 @@ export function useScanProxies() {
   });
 }
 
-export type { DetectedProxy };
+export type { DetectedProxy, ProxyScope };

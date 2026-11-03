@@ -4,6 +4,7 @@
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
+use crate::proxy::http_client::ProxyScope;
 use rusqlite::params;
 
 impl Database {
@@ -168,6 +169,27 @@ impl Database {
                 Ok(())
             }
         }
+    }
+
+    /// 路由请求出站代理范围的存储键名
+    const GLOBAL_PROXY_SCOPE_KEY: &'static str = "global_proxy_scope";
+
+    /// 获取路由请求的出站代理范围；未配置或数据损坏时按「全部供应商」
+    pub fn get_global_proxy_scope(&self) -> Result<ProxyScope, AppError> {
+        let Some(raw) = self.get_setting(Self::GLOBAL_PROXY_SCOPE_KEY)? else {
+            return Ok(Default::default());
+        };
+        Ok(serde_json::from_str(&raw).unwrap_or_else(|e| {
+            log::warn!("[GlobalProxy] Invalid stored proxy scope, falling back to all: {e}");
+            Default::default()
+        }))
+    }
+
+    /// 保存路由请求的出站代理范围
+    pub fn set_global_proxy_scope(&self, scope: &ProxyScope) -> Result<(), AppError> {
+        let raw = serde_json::to_string(scope)
+            .map_err(|e| AppError::Config(format!("Failed to serialize proxy scope: {e}")))?;
+        self.set_setting(Self::GLOBAL_PROXY_SCOPE_KEY, &raw)
     }
 
     // --- 代理接管状态管理（已废弃，使用 proxy_config.enabled 替代）---

@@ -33,6 +33,38 @@ export interface DetectedProxy {
 }
 
 /**
+ * 路由请求的出站代理范围
+ *
+ * - `all`：本地路由转发到的所有供应商都走全局代理
+ * - `selected`：只有 `providers` 里勾选的供应商走代理，其余直连
+ */
+export type ProxyScopeMode = "all" | "selected";
+
+export interface ProxyScope {
+  mode: ProxyScopeMode;
+  /** 应用 id → 走代理的供应商 id */
+  providers: Record<string, string[]>;
+}
+
+/**
+ * 获取路由请求的出站代理范围
+ */
+export async function getGlobalProxyScope(): Promise<ProxyScope> {
+  return invoke<ProxyScope>("get_global_proxy_scope");
+}
+
+/**
+ * 设置路由请求的出站代理范围（保存后下一个路由请求即生效）
+ */
+export async function setGlobalProxyScope(scope: ProxyScope): Promise<void> {
+  try {
+    return await invoke("set_global_proxy_scope", { scope });
+  } catch (error) {
+    throw new Error(typeof error === "string" ? error : String(error));
+  }
+}
+
+/**
  * 获取全局代理 URL
  *
  * @returns 代理 URL，null 表示未配置（直连）

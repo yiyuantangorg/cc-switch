@@ -3,8 +3,10 @@
 //! 提供支持全局代理配置的 HTTP 客户端。
 //! 所有需要发送 HTTP 请求的模块都应使用此模块提供的客户端。
 
-use once_cell::sync::OnceCell;
+use once_cell::sync::{Lazy, OnceCell};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::env;
 use std::net::IpAddr;
 use std::sync::RwLock;
@@ -12,6 +14,87 @@ use std::time::Duration;
 
 /// 全局 HTTP 客户端实例
 static GLOBAL_CLIENT: OnceCell<RwLock<Client>> = OnceCell::new();
+
+/// 本地路由转发到供应商时，哪些供应商走全局出站代理
+static PROXY_SCOPE: Lazy<RwLock<ProxyScope>> = Lazy::new(|| RwLock::new(ProxyScope::default()));
+
+/// 全局出站代理在本地路由里的作用范围
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyScopeMode {
+    /// 路由到的所有供应商都走代理（旧行为）
+    #[default]
+    All,
+    /// 只有 `providers` 里勾选的供应商走代理，其余直连
+    Selected,
+}
+
+/// 路由请求的出站代理范围。只影响本地路由转发（和供应商连通性检查），
+/// OAuth 登录、Skills 下载、云同步等其它出站请求始终按全局代理走。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyScope {
+    #[serde(default)]
+    pub mode: ProxyScopeMode,
+    /// 应用 id（`AppType::as_str`）→ 走代理的供应商 id
+    #[serde(default)]
+    pub providers: BTreeMap<String, Vec<String>>,
+}
+
+impl ProxyScope {
+    /// 发往 `app` 下的供应商 `provider_id` 的路由请求是否走全局代理
+    pub fn includes(&self, app: &str, provider_id: &str) -> bool {
+        match self.mode {
+            ProxyScopeMode::All => true,
+            ProxyScopeMode::Selected => self
+                .providers
+                .get(app)
+                .is_some_and(|ids| ids.iter().any(|id| id == provider_id)),
+        }
+    }
+
+    /// 去掉空白 id、重复 id 和空应用，存储前调用
+    pub fn normalized(mut self) -> Self {
+        for ids in self.providers.values_mut() {
+            let mut seen = std::collections::HashSet::new();
+            ids.retain(|id| !id.trim().is_empty() && seen.insert(id.clone()));
+        }
+        self.providers
+            .retain(|app, ids| !app.trim().is_empty() && !ids.is_empty());
+        self
+    }
+}
+
+/// 设置路由请求的出站代理范围（启动时从数据库加载，设置页保存后热更新）
+pub fn set_proxy_scope(scope: ProxyScope) {
+    match PROXY_SCOPE.write() {
+        Ok(mut current) => {
+            log::info!(
+                "[GlobalProxy] Routing proxy scope: {:?} ({} app(s) with selected providers)",
+                scope.mode,
+                scope.providers.len()
+            );
+            *current = scope;
+        }
+        Err(e) => log::error!("[GlobalProxy] Failed to update proxy scope: {e}"),
+    }
+}
+
+/// 当前路由请求的出站代理范围
+pub fn get_proxy_scope() -> ProxyScope {
+    PROXY_SCOPE
+        .read()
+        .map(|scope| scope.clone())
+        .unwrap_or_default()
+}
+
+/// 路由到 `app` 下的供应商 `provider_id` 时是否走全局代理
+pub fn provider_uses_proxy(app: &str, provider_id: &str) -> bool {
+    PROXY_SCOPE
+        .read()
+        .map(|scope| scope.includes(app, provider_id))
+        .unwrap_or(true)
+}
 
 /// 不走任何代理的客户端：上游是本机地址（Ollama、LM Studio 等）时使用
 static DIRECT_CLIENT: OnceCell<Client> = OnceCell::new();
@@ -222,6 +305,24 @@ fn upstream_proxy_for(url: &str, current: Option<String>) -> Option<String> {
         None
     } else {
         current
+    }
+}
+
+/// 本地路由发往供应商时取客户端：本机地址、或不在代理范围内的供应商直连，其余同 [`get`]
+pub fn get_for_provider(url: &str, app: &str, provider_id: &str) -> Client {
+    if is_loopback_url(url) || !provider_uses_proxy(app, provider_id) {
+        direct_client()
+    } else {
+        get()
+    }
+}
+
+/// 本地路由发往供应商时应使用的上游代理：本机地址、或不在代理范围内的供应商返回 None
+pub fn proxy_url_for_provider(url: &str, app: &str, provider_id: &str) -> Option<String> {
+    if provider_uses_proxy(app, provider_id) {
+        proxy_url_for(url)
+    } else {
+        None
     }
 }
 
@@ -546,6 +647,94 @@ mod tests {
             .await
             .expect("direct client should reach the local server");
         assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    #[test]
+    fn test_proxy_scope_all_includes_every_provider() {
+        let scope = ProxyScope::default();
+        assert_eq!(scope.mode, ProxyScopeMode::All);
+        assert!(scope.includes("claude", "anything"));
+        assert!(scope.includes("codex", "other"));
+    }
+
+    #[test]
+    fn test_proxy_scope_selected_only_includes_listed_providers() {
+        let scope = ProxyScope {
+            mode: ProxyScopeMode::Selected,
+            providers: BTreeMap::from([("claude".to_string(), vec!["p1".to_string()])]),
+        };
+        assert!(scope.includes("claude", "p1"));
+        assert!(!scope.includes("claude", "p2"));
+        // 同一个 id 在别的应用下不算
+        assert!(!scope.includes("codex", "p1"));
+    }
+
+    #[test]
+    fn test_proxy_scope_serde_and_defaults() {
+        // 旧数据 / 缺字段时按「全部」
+        let empty: ProxyScope = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty, ProxyScope::default());
+
+        let scope: ProxyScope =
+            serde_json::from_str(r#"{"mode":"selected","providers":{"codex":["a","b"]}}"#).unwrap();
+        assert_eq!(scope.mode, ProxyScopeMode::Selected);
+        assert!(scope.includes("codex", "b"));
+        assert_eq!(
+            serde_json::to_value(&scope).unwrap(),
+            serde_json::json!({"mode":"selected","providers":{"codex":["a","b"]}})
+        );
+    }
+
+    #[test]
+    fn test_proxy_scope_normalized_drops_blank_and_duplicate_ids() {
+        let scope = ProxyScope {
+            mode: ProxyScopeMode::Selected,
+            providers: BTreeMap::from([
+                (
+                    "claude".to_string(),
+                    vec!["a".to_string(), " ".to_string(), "a".to_string()],
+                ),
+                ("codex".to_string(), vec![]),
+            ]),
+        }
+        .normalized();
+        assert_eq!(
+            scope.providers,
+            BTreeMap::from([("claude".to_string(), vec!["a".to_string()])])
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_provider_proxy_url_follows_scope() {
+        let previous = get_proxy_scope();
+        let target = "https://api.example.com/v1/messages";
+
+        set_proxy_scope(ProxyScope {
+            mode: ProxyScopeMode::Selected,
+            providers: BTreeMap::from([("claude".to_string(), vec!["proxied".to_string()])]),
+        });
+        assert!(provider_uses_proxy("claude", "proxied"));
+        assert!(!provider_uses_proxy("claude", "direct"));
+        assert_eq!(
+            proxy_url_for_provider(target, "claude", "direct"),
+            None,
+            "providers outside the scope must connect directly"
+        );
+        // 选中的供应商仍按全局规则走（本机地址照旧直连）
+        assert_eq!(
+            proxy_url_for_provider(target, "claude", "proxied"),
+            proxy_url_for(target)
+        );
+        assert_eq!(
+            proxy_url_for_provider("http://localhost:11434/v1", "claude", "proxied"),
+            None
+        );
+
+        set_proxy_scope(ProxyScope::default());
+        assert!(provider_uses_proxy("claude", "direct"));
+
+        set_proxy_scope(previous);
     }
 
     #[test]

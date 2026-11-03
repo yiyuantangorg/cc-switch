@@ -1371,6 +1371,13 @@ pub fn run() {
                 let db = &app.state::<AppState>().db;
                 let proxy_url = db.get_global_proxy_url().ok().flatten();
 
+                match db.get_global_proxy_scope() {
+                    Ok(scope) => crate::proxy::http_client::set_proxy_scope(scope),
+                    Err(e) => log::warn!(
+                        "[GlobalProxy] Failed to load routing proxy scope, using all providers: {e}"
+                    ),
+                }
+
                 if let Err(e) = crate::proxy::http_client::init(proxy_url.as_deref()) {
                     log::error!(
                         "[GlobalProxy] [GP-005] Failed to initialize with saved config: {e}"
@@ -1924,6 +1931,8 @@ pub fn run() {
             // Global upstream proxy
             commands::get_global_proxy_url,
             commands::set_global_proxy_url,
+            commands::get_global_proxy_scope,
+            commands::set_global_proxy_scope,
             commands::test_proxy_url,
             commands::get_upstream_proxy_status,
             commands::scan_local_proxies,

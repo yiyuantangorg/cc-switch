@@ -138,7 +138,12 @@ impl StreamCheckService {
             None => Self::resolve_base_url(app_type, provider)?,
         };
 
-        let client = crate::proxy::http_client::get_for_url(&base_url);
+        // 有路由模式的应用和路由转发同一口径：不在出站代理范围内的供应商直连
+        let client = if app_type.has_route_mode() {
+            crate::proxy::http_client::get_for_provider(&base_url, app_type.as_str(), &provider.id)
+        } else {
+            crate::proxy::http_client::get_for_url(&base_url)
+        };
         let timeout = std::time::Duration::from_secs(config.timeout_secs);
         let ua = Self::custom_user_agent(provider);
 

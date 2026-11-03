@@ -150,6 +150,9 @@ vi.mock("@/components/settings/ProxyTabContent", () => ({
 vi.mock("@/components/settings/GlobalProxySettings", () => ({
   GlobalProxySettings: () => <div>global-proxy-settings</div>,
 }));
+vi.mock("@/components/settings/GlobalProxyScopeSettings", () => ({
+  GlobalProxyScopeSettings: () => <div>global-proxy-scope-settings</div>,
+}));
 vi.mock("@/components/settings/CodexAuthSettings", () => ({
   CodexAuthSettings: () => <div>codex-auth-settings</div>,
 }));
@@ -218,6 +221,7 @@ describe("SettingsPage", () => {
       }),
     ).toBeInTheDocument();
     expect(screen.getByText("global-proxy-settings")).toBeInTheDocument();
+    expect(screen.getByText("global-proxy-scope-settings")).toBeInTheDocument();
   });
 
   it("saves general switches immediately and links to the Apps page", async () => {
