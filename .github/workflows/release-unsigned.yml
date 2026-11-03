@@ -1,0 +1,236 @@
+name: Release (unsigned)
+
+# Fork release path that needs no secrets. release.yml requires the Tauri updater key
+# and an Apple Developer ID; this workflow builds the same version without them and
+# publishes the packages as GitHub Release v<package.json version>:
+# - no updater artifacts (.sig / latest.json); the in-app updater keeps following the
+#   official releases, so an official update would replace this build
+# - macOS app is ad-hoc signed only (Gatekeeper asks before first launch)
+# - Windows MSI is not Authenticode-signed (SmartScreen asks before install)
+#
+# Run it from the Actions tab or `gh workflow run release-unsigned.yml --ref main`.
+# The tag is created with GITHUB_TOKEN, which does not trigger release.yml.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-unsigned-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            label: Windows-x86_64
+          - os: ubuntu-22.04
+            label: Linux-x86_64
+          - os: ubuntu-22.04-arm
+            label: Linux-arm64
+          - os: macos-15
+            label: macOS
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      # rust-toolchain.toml 是编译器版本的唯一来源
+      - name: Read pinned Rust toolchain
+        id: rust-toolchain
+        shell: bash
+        run: |
+          channel=$(sed -nE 's/^channel *= *"([^"]+)".*/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl wget file patchelf libssl-dev rpm xdg-utils \
+            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+
+      - name: Setup pnpm
+        shell: bash
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          corepack install
+          pnpm --version
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      # 没有更新签名私钥：关掉 updater 产物，否则 tauri build 找不到私钥直接失败
+      - name: Disable updater artifacts
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("fs");
+            const file = "src-tauri/tauri.conf.json";
+            const config = JSON.parse(fs.readFileSync(file, "utf8"));
+            config.bundle.createUpdaterArtifacts = false;
+            fs.writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
+          '
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: pnpm tauri build --bundles msi
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: pnpm tauri build --bundles appimage,deb,rpm
+
+      # 和 release.yml 一样只让 Tauri 打 .app，zip / dmg 自己做（Tauri 的 DMG 在 CI 上不稳）
+      - name: Build (macOS universal)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: pnpm tauri build --target universal-apple-darwin --bundles app
+
+      - name: Collect assets
+        shell: bash
+        env:
+          LABEL: ${{ matrix.label }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          VERSION="v$(node -p 'require("./package.json").version')"
+          mkdir -p release-assets
+          bundle=src-tauri/target/release/bundle
+          case "$LABEL" in
+            Windows-*)
+              for f in "$bundle"/msi/*.msi; do
+                cp "$f" "release-assets/CC-Switch-$VERSION-$LABEL.msi"
+              done
+              ;;
+            Linux-*)
+              for f in "$bundle"/appimage/*.AppImage; do
+                cp "$f" "release-assets/CC-Switch-$VERSION-$LABEL.AppImage"
+              done
+              for f in "$bundle"/deb/*.deb; do
+                cp "$f" "release-assets/CC-Switch-$VERSION-$LABEL.deb"
+              done
+              for f in "$bundle"/rpm/*.rpm; do
+                cp "$f" "release-assets/CC-Switch-$VERSION-$LABEL.rpm"
+              done
+              ;;
+            macOS)
+              app=$(find src-tauri/target/universal-apple-darwin/release/bundle/macos \
+                -maxdepth 1 -name '*.app' -type d | head -1)
+              test -n "$app"
+              # 没有 Developer ID：ad-hoc 签名，否则 Apple 芯片上会报「已损坏」
+              codesign --force --deep --sign - "$app"
+              ditto -c -k --sequesterRsrc --keepParent "$app" \
+                "release-assets/CC-Switch-$VERSION-macOS.zip"
+              stage="$RUNNER_TEMP/dmg-stage"
+              mkdir -p "$stage"
+              ditto "$app" "$stage/CC Switch.app"
+              ln -s /Applications "$stage/Applications"
+              # CI 上 hdiutil 偶尔报 "Resource busy"，重试几次
+              for attempt in 1 2 3; do
+                if hdiutil create -volname "CC Switch" -srcfolder "$stage" -ov -format UDZO \
+                  "release-assets/CC-Switch-$VERSION-macOS.dmg"; then
+                  break
+                fi
+                if [ "$attempt" -eq 3 ]; then
+                  exit 1
+                fi
+                sleep 10
+              done
+              ;;
+          esac
+          ls -la release-assets
+          files=(release-assets/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No release assets were produced for $LABEL" >&2
+            exit 1
+          fi
+
+      - name: Upload assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-unsigned-${{ matrix.label }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download assets
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-unsigned-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p 'require("./package.json").version')
+          TAG="v$VERSION"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists; bump the version first" >&2
+            exit 1
+          fi
+          # 发布说明：CHANGELOG 里这一版的段落 + 未签名安装说明
+          awk -v ver="$VERSION" '
+            index($0, "## [" ver "]") == 1 { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          cat >> notes.md <<'EOF'
+
+          ### Unsigned build
+
+          These packages are built without code-signing certificates and without updater signatures. The in-app updater still follows the official CC Switch releases: installing an official update replaces this build and drops this fork's changes.
+
+          - **macOS**: open the `.dmg`, drag CC Switch to Applications, then right-click the app → Open (or run `xattr -cr "/Applications/CC Switch.app"`).
+          - **Windows**: if SmartScreen appears, choose "More info" → "Run anyway".
+          - **Linux**: AppImage, `.deb` and `.rpm` for x86_64 and arm64.
+          EOF
+          ls -la release-assets
+          gh release create "$TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "CC Switch $TAG" \
+            --notes-file notes.md
