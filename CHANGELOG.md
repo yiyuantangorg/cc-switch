@@ -5,6 +5,14 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.26] - 2026-11-03
+
+This release lets local routing send only selected providers through the outbound proxy.
+
+### Added
+
+- **Proxy Scope for Local Routing**: Settings → Network gains a "Proxy Scope for Local Routing" block. "All providers" (default) keeps the old behavior; "Selected providers" lists every Claude Code, Codex, Gemini CLI, Grok Build and Claude Desktop provider with a checkbox, and only checked providers use the outbound proxy while the rest connect directly (bypassing the system proxy as well). The scope is stored in the `global_proxy_scope` setting, applies from the next routed request after saving, follows each provider during failover and also covers provider health checks. Sign-ins, OAuth token refreshes, Skills downloads, cloud sync and model fetching keep using the outbound proxy.
+
 ## [4.0.25] - 2026-11-02
 
 This release adds on-demand MCP connectivity checks, an opt-in guard that pauses official Codex requests routed through CC Switch before the five-hour or weekly quota runs out, automatic exchange rates for the usage page, a sub-agent concurrency limit in the Codex provider form, provider and upstream model descriptions for routed and stacked models in the Claude Code and Claude Desktop model pickers, Kimi Code session deletion and GPT-6.1 Terra pricing. The local router now rejects requests sent from web pages. Fixes cover "Open terminal" inheriting proxy and stack settings, route mode putting the placeholder in `ANTHROPIC_API_KEY`, one attached document breaking every later turn on text-only upstreams, provider form values flickering on Windows, Pi MCP import and subagent usage, models.dev sync failing in proxy-only environments, forced web search rejected by xAI, the tray panel not opening during startup usage import, and mapped Codex requests counted twice.

@@ -1,0 +1,12 @@
+{
+  "version": "4.0.26",
+  "items": [
+    {
+      "type": "new",
+      "zh": "本地路由可以只让指定供应商走出站代理",
+      "zh-TW": "本機路由可以只讓指定供應商走出站代理",
+      "en": "Local routing can send only selected providers through the outbound proxy",
+      "ja": "ローカルルーティングで指定したプロバイダーだけをプロキシ経由に"
+    }
+  ]
+}
