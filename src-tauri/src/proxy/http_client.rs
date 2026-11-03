@@ -80,8 +80,9 @@ pub fn set_proxy_scope(scope: ProxyScope) {
     }
 }
 
-/// 当前路由请求的出站代理范围
-pub fn get_proxy_scope() -> ProxyScope {
+/// 当前路由请求的出站代理范围（运行时只读 [`provider_uses_proxy`]，测试用它保存 / 还原）
+#[cfg(test)]
+fn get_proxy_scope() -> ProxyScope {
     PROXY_SCOPE
         .read()
         .map(|scope| scope.clone())
